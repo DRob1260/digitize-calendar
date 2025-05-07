@@ -1,65 +1,103 @@
 import cv2
+import time
 import numpy as np
-import pytesseract
+from picamera2 import Picamera2
 from PIL import Image
-import json
-import os
+from datetime import datetime
 
-# Make sure Tesseract is installed and properly referenced
-# pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'  # if needed
+# Initialize Picamera2
+picam2 = Picamera2()
 
-# Load the calendar image
-img = cv2.imread('calendar.jpg')
-gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-blurred = cv2.GaussianBlur(gray, (5,5), 0)
+# Low-res video config for motion detection
+video_config = picam2.create_video_configuration(main={"size": (640, 480)})
+picam2.configure(video_config)
+picam2.start()
+time.sleep(2)  # Camera warm-up
 
-# Detect edges and lines
-edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
-lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=100, maxLineGap=10)
+# Autofocus once and lock (optional)
+try:
+    picam2.set_controls({"AfMode": 2})  # Autofocus once
+    time.sleep(1)
+    picam2.set_controls({"AfMode": 0})  # Lock focus
+except Exception as e:
+    print("Autofocus not supported or failed:", e)
 
-# Draw detected lines
-line_img = np.zeros_like(img)
-for line in lines:
-    x1, y1, x2, y2 = line[0]
-    cv2.line(line_img, (x1, y1), (x2, y2), (255,255,255), 2)
+# Motion detection state
+prev_frame = None
+motion_detected = False
+motion_timer = None
+motion_timeout = 2  # Seconds of stillness before taking photo
+motion_threshold = 100  # Lower = more sensitive
 
-# Find cell contours
-gray_lines = cv2.cvtColor(line_img, cv2.COLOR_BGR2GRAY)
-contours, _ = cv2.findContours(gray_lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+print("Monitoring for motion...")
 
-# Prepare output
-calendar_data = {"days": []}
+while True:
+    # Capture frame and ensure it's usable
+    frame = picam2.capture_array("main").copy()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
-# Create output folder for day images
-output_folder = "days"
-os.makedirs(output_folder, exist_ok=True)
+    if prev_frame is None:
+        prev_frame = gray
+        continue
 
-# Sort contours top to bottom, left to right
-bounding_boxes = [cv2.boundingRect(c) for c in contours]
-bounding_boxes = sorted(bounding_boxes, key=lambda b: (b[1], b[0]))  # sort by y, then x
+    # Frame diff for motion detection
+    frame_delta = cv2.absdiff(prev_frame, gray)
+    thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    motion_score = np.sum(thresh) / 255
 
-i = 1
-for x, y, w, h in bounding_boxes:
-    if w > 50 and h > 50:  # filter small noise
-        day_img = img[y:y+h, x:x+w]
-        
-        # Save each cropped day image
-        day_filename = os.path.join(output_folder, f"day_{i:02d}.jpg")
-        cv2.imwrite(day_filename, day_img)
+    if motion_score > motion_threshold:
+        if not motion_detected:
+            print("Motion detected!")
+        motion_detected = True
+        motion_timer = time.time()
+    else:
+        if motion_detected and motion_timer and (time.time() - motion_timer) > motion_timeout:
+            print("Motion stopped. Preparing to capture image...")
+            time.sleep(1.5)  # Let the scene settle
 
-        # OCR on the saved day image
-        text = pytesseract.image_to_string(Image.open(day_filename), config='--psm 6')
-        text = text.strip()
+            # Switch to still mode
+            picam2.stop()
+            still_config = picam2.create_still_configuration(main={"size": (3280, 2464)})
+            picam2.configure(still_config)
+            picam2.start()
+            time.sleep(1)  # Let auto settings stabilize
 
-        calendar_data["days"].append({
-            "day": i,
-            "events": text
-        })
-        i += 1
+            # Autofocus again (if supported)
+            try:
+                picam2.set_controls({"AfMode": 2})
+                time.sleep(2)
+                picam2.set_controls({"AfMode": 0})
+            except:
+                pass
 
-# Save to JSON
-with open('calendar_events.json', 'w', encoding='utf-8') as f:
-    json.dump(calendar_data, f, indent=2)
+            # Optional: manual exposure/gain (sharper images)
+            try:
+                picam2.set_controls({
+                    "ExposureTime": 0,     # 0 tells it to go auto
+                    "AnalogueGain": 0.0    # 0.0 = auto gain
+                })
+            except:
+                pass
 
-print("Calendar events saved to calendar_events.json!")
-print(f"Cropped day images saved to {output_folder}/")
+            time.sleep(0.5)  # Final pause before capture
+
+            # Capture image and save
+            image = picam2.capture_array("main").copy()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"./motion_{timestamp}.jpg"
+            Image.fromarray(image).save(filename)
+            print(f"Image saved: {filename}")
+
+            # Return to video mode for motion detection
+            picam2.stop()
+            picam2.configure(video_config)
+            picam2.start()
+            time.sleep(1)
+
+            motion_detected = False
+            motion_timer = None
+
+    prev_frame = gray
+    time.sleep(0.2)
