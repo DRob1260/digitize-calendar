@@ -87,7 +87,7 @@ while True:
             image = picam2.capture_array("main").copy()
             timestamp = datetime.now().strftime("%m-%d-%Y (%H-%M-%S)")
             filename = f"/mnt/mom-calendar/{timestamp}.jpg"
-            Image.fromarray(image).save(filename)
+            Image.fromarray(image).rotate(180).save(filename)
             print(f"Image saved: {filename}")
 
             # Return to video mode for motion detection
