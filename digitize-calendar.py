@@ -85,8 +85,8 @@ while True:
 
             # Capture image and save
             image = picam2.capture_array("main").copy()
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"./motion_{timestamp}.jpg"
+            timestamp = datetime.now().strftime("%m-%d-%Y (%H-%M-%S)")
+            filename = f"/mnt/mom-calendar/{timestamp}.jpg"
             Image.fromarray(image).save(filename)
             print(f"Image saved: {filename}")
 
